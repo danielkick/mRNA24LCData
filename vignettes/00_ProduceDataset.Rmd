@@ -1,0 +1,1896 @@
+---
+title: "Produce Dataset"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# library(here)
+# library(readxl)
+# library(tidyverse)
+# library(janitor)
+# library(readABF)
+# 
+# library(zoo)
+# library(broom)
+# library(gdata) # for humanReadable, used in checking the files are the expected size
+# library(minpack.lm) # for use in fit_tau_1term_exp() to get Tau
+# 
+# library(ggsci)
+# library(cowplot)
+# library(patchwork)
+# theme_set(ggplot2::theme_minimal())
+# 
+# library(devtools)
+# devtools::load_all()
+```
+
+## Forward 
+This file represents the full preparation of data. Ideally, where we pull processed data (e.g. where I've manually extraced values in clamp fit) will ultimately be replaced with automated, repeatable, and auditable processing. Auditing will be accomplished by including and option to write graphs of the input/output. 
+
+```{r}
+# TODO replace manual processing with automatic
+# TODO Generate audit output
+# TODO edit metadata file so as to allow for specification of traces or regions of traces to be excluded from a file (e.g. drop a segment with loss of voltage clamp)
+```
+
+## Build metadata
+
+```{r global params}
+use.file.path <- here("inst", "extdata", "ManualDataEphys02.xlsx")
+
+abf_dir_path <- "C:/Users/Daniel/Documents/GitHub/mRNA24hLC/inst/extdata/ABFs/0000_Traces_mRNA24hLC/" 
+#here("inst", "extdata", "ABFs","0000_Traces_mRNA24hLC") #"F:/0000_Traces_mRNA24hLC/"
+
+force_process_ABF <- c("000000_0000.abf")
+```
+
+# Retrieve manually processed data ----
+
+## Load Data Ephys Data
+```{r}
+metadata <- read_excel(use.file.path,
+                       sheet = "MetadataEphys")  
+
+ia <- read_excel(
+use.file.path,
+  sheet = "IA"
+)
+
+ihtk <- read_excel(
+use.file.path,
+  sheet = "IHTK"
+)
+
+tecc <- read_excel(
+use.file.path,
+  sheet = "TECC"
+)
+
+tevc <- read_excel(
+use.file.path,
+  sheet = "TEVC"
+)
+```
+
+# Working off of non-processed data ----
+
+## Find all the relevant files
+```{r}
+metadata <- read_excel(use.file.path, sheet = "MetadataEphys")  
+# update_type_names <- as_tibble(t(matrix(
+#   c("htk", "htk", # ion
+#     "a", "a",
+#     "htkc", "htkc",
+#     "ac", "ac",
+#     
+#     "tevc", "gjvc", # gj, Rs
+#     "igj", "gjcc",
+#     "igj_50", "gjcc",
+#     
+#     "fi_50", "fi", # excitability
+#     "fi", "fi",
+#     "epsp", "epsp",
+#     "epsp_50", "epsp",
+#     
+#     "gj", "Unknown" #FIXME what are these?
+#   ), nrow = 2)))
+# names(update_type_names) <- c("InFile", "NewType")
+```
+
+## Check on hand abfs
+```{r eval=FALSE, include=FALSE}
+# Check for missing files relative to the abf directory
+
+# Find all the traces specified in the metadata file (i.e. where type is not NA) and check to see if they exist in the `abf_dir`
+
+absent_traces <- metadata[!is.na(metadata$Type), ]
+absent_traces$Exists <- F
+
+abf_dir <- list.files(abf_dir_path)
+for (i in seq(1, nrow(absent_traces))){
+  # make the file name
+  num_zeros <- 4-nchar(absent_traces[i, "Recording"])
+  num_zeros <- case_when(num_zeros == 0 ~ "",
+                         num_zeros == 1 ~ "0",
+                         num_zeros == 2 ~ "00",
+                         num_zeros == 3 ~ "000")
+  
+  abf_name <- paste(as.character(absent_traces[i, "Experiment"]),
+                    paste0(num_zeros, as.character(absent_traces[i, "Recording"]), ".abf"), 
+                    sep = "_")
+  # check if it exists in the dir
+  absent_traces[i, "Exists"] <- abf_name %in% abf_dir
+  
+  # print(abf_name)
+}
+
+absent_traces_to_find <- absent_traces %>% 
+  filter(Exists == F) %>% 
+  mutate(RecordingLeadZeros = case_when((4 - nchar(Recording)) == 0 ~ "",
+                                        (4 - nchar(Recording)) == 1 ~ "0",
+                                        (4 - nchar(Recording)) == 2 ~ "00",
+                                        (4 - nchar(Recording)) == 3 ~ "000")) %>% 
+  mutate(FileName = paste0(Experiment, "_", RecordingLeadZeros, Recording, ".abf"))
+```
+
+
+## Finding missing ABFs on the shared drive w/o Microsoft's search
+```{r eval=FALSE, include=FALSE}
+# Indexing all the ABFs in my directory on the shared drive is time consumming (~55 minutes over the VPN). It should only be done when an index doesn't exist already of if there's reason to beleave the index is no longer accurate. 
+if (!file.exists(here("inst", "extdata", "shared_drive_abf_index.csv"))){
+  start_loc <- "S:/Data_Daniel"
+  
+  tic <- Sys.time()
+  all_abfs <- list.files("S:/Data_Daniel", "*.abf", recursive = T)
+  toc <- Sys.time()
+  print(toc - tic)
+  
+  write.csv(as.data.frame(all_abfs), file = here("inst", "extdata", "shared_drive_abf_index.csv"))
+  rm(list = "all_abfs")
+} 
+all_abfs_on_shared_drive <- read.csv(here("inst", "extdata", "shared_drive_abf_index.csv"))
+```
+
+
+```{r eval=FALSE, include=FALSE}
+all_abfs_on_shared_drive <- all_abfs_on_shared_drive %>% 
+  as_tibble() %>% 
+  mutate(all_abfs = as.character(all_abfs))
+
+broken_path <- str_split(all_abfs_on_shared_drive$all_abfs, pattern = "/")
+
+all_abfs_on_shared_drive$FileName <- map_chr(
+  seq_along(broken_path), function(i){
+  broken_path[[i]][[length(broken_path[[i]])]]
+})
+
+
+# if there's a match pull the path
+absent_traces_to_find$PathOnShared <- NA
+
+for (i in 1:nrow(absent_traces_to_find)){
+  if(as.character(absent_traces_to_find[i, "FileName"]) %in% all_abfs_on_shared_drive$FileName){
+    # get path
+    absent_traces_to_find[i, "PathOnShared"] <- all_abfs_on_shared_drive[all_abfs_on_shared_drive$FileName == as.character(absent_traces_to_find[i, "FileName"]), "all_abfs"]
+
+  } else {
+    absent_traces_to_find[i, "PathOnShared"] <- NA
+  }
+}
+
+# move from server
+absent_traces_to_find$moved <- F
+# Check for file's existence, if it's there move it and tag it as moved.
+for (i in 1:nrow(absent_traces_to_find)){
+  if(!is.na(absent_traces_to_find[i, "PathOnShared"])){
+    file_to_move <- paste0("S:/Data_Daniel", "/", as.character(absent_traces_to_find[i, "PathOnShared"]))
+    
+    if (file.exists(file_to_move)){
+      file.copy(
+        from = file_to_move,
+        to = paste0(
+          abf_dir_path,
+          absent_traces_to_find[i, "FileName"]  
+        )
+      )
+      
+      absent_traces_to_find[i, "moved"]  <- T
+    }
+  }
+}
+
+# After everything's moved, manually search for the rest. 
+
+manually_find <- absent_traces_to_find %>% 
+  filter(moved == F) %>% 
+  select(Experiment, Page, Recording, Type, TEA, Condition, FileName)
+write.csv(manually_find, file = here("data", "manually_find_ABFs.csv"))
+
+
+# Can't seem to find experiment 190917a
+# looking at manually processed data I don't see any evidence of it. Possibly it didn't get moved to the shared drive? 
+#FIXME go and check the lab computer to make sure the missing file isn't there. 
+metadata <- metadata[metadata$Experiment != "190917a", ]
+```
+
+## Automated processing of passive properties
+
+```{r}
+metadata <- metadata %>% 
+  mutate(ABFType = case_when(Type %in% c("tevc") ~ "gjvc",
+                            Type %in% c("igj","igj_50", "gj") ~ "gjcc",
+                            Type %in% c("epsp", "epsp_50") ~ "epsp",
+                            Type %in% c("fi_50", "fi") ~ "fi"))
+
+abfs_to_process <- metadata %>% 
+  filter(ABFType %in% c("gjvc", "gjcc", "epsp", "fi")) %>% 
+  filter(Condition %in% c("Baseline", "Compensated", "Delayed"))
+
+# make expected file names
+abfs_to_process <- abfs_to_process %>% 
+  mutate(num_zeros = str_length(Recording)) %>% 
+  mutate(num_zeros = ifelse(num_zeros == 1, "000", 
+                            ifelse(num_zeros == 2, "00", 
+                                   ifelse(num_zeros == 3, "0", NA)))) %>% 
+  mutate(File = paste0(Experiment, "_", num_zeros, as.character(Recording), ".abf" )) %>% 
+  select(-num_zeros)
+
+```
+
+
+```{r}
+# Many experiments with duplicate recordings
+abfs_to_process %>% 
+  select(Experiment, ABFType, In4, In9, File) %>% 
+  gather(key = "Channel", value = "Cell", c("In4", "In9")) %>% 
+  group_by(Experiment, Cell, ABFType) %>% 
+  tally()
+
+abfs_to_process <- abfs_to_process %>% 
+  select(Experiment, ABFType, In4, In9, File) %>% 
+  gather(key = "Channel", value = "Cell", c("In4", "In9")) %>% 
+  mutate(Processed = F)
+```  
+
+Process gjvcs
+```{r eval=FALSE, include=FALSE}
+tictoc::tic()
+
+process_these_abfs <- abfs_to_process %>% filter(ABFType == "gjvc")
+
+unique_abfs <- unique(process_these_abfs$File)
+
+
+# unique_abfs[i]
+
+# inelegant, but functional. 
+unique_abfs <- unique_abfs[!(unique_abfs %in% c(
+  "190903_0027.abf",
+  
+  "190904_0017.abf", #lm.fit
+  "190904_0027.abf", #lm.fit
+  
+  "190906_0031.abf",
+  "190906_0041.abf",
+  
+  "190915_0023.abf"
+))]
+
+# FIXME it seems that "190903_0027.abf" is being run even though it should be rejected\
+ # Error in lm.fit(x, y, offset = offset, singular.ok = singular.ok, ...) : 
+ #  0 (non-NA) cases 
+
+for (i in seq_along(unique_abfs)){
+  print(i)
+  # process_these_abfs[process_these_abfs$File == unique_abfs[i], ]
+
+  current_file <- as.character(unlist(process_these_abfs[process_these_abfs$File == unique_abfs[i], "File"])[1])
+  ## Should we process the current ABF? ====
+  current_trace <- check_abf_expected(
+    exempt_ABF = force_process_ABF, 
+    dir_path = abf_dir_path,
+    file_name = current_file,
+    file_type = as.character(unlist(process_these_abfs[process_these_abfs$File == unique_abfs[i], "ABFType"])[1])
+  )
+  
+  
+  if (current_trace$process){
+    current_trace <- current_trace$trace
+    
+    
+    out <- process_gjvc_trace(trace = current_trace)
+    
+
+          process_these_abfs[process_these_abfs$File == current_file & process_these_abfs$Channel == "In4", "Ig"] <-  out$df[1, "In4_to_In9"]
+          process_these_abfs[process_these_abfs$File == current_file & process_these_abfs$Channel == "In9", "Ig"] <-  out$df[1, "In9_to_In4"]
+          process_these_abfs[process_these_abfs$File == current_file & process_these_abfs$Channel == "In4", "R1c"] <- out$df[1, "In4_R1c"]
+          process_these_abfs[process_these_abfs$File == current_file & process_these_abfs$Channel == "In9", "R1c"] <- out$df[1, "In9_R1c"]
+          
+          # Save for review: ####
+          save_plot(here("data", "data_audits", "gjvc", paste(str_remove(current_file, ".abf"), "gjvc", "trace.pdf", sep = "-")),
+                    out$diagnostic_plots$trace, base_height = 7, base_width = 10)
+          
+          save_plot(here("data", "data_audits", "gjvc", paste(str_remove(current_file, ".abf"), "gjvc", "fit.pdf", sep = "-")),
+                    out$diagnostic_plots$fit, base_height = 7, base_width = 10)   
+          
+          # write.csv(out$df,
+          #           here("data", "data_audits", paste(str_remove(input_file, ".abf"), "gjvc", "df.csv", sep = "-"))          )
+
+    
+  } 
+}
+
+
+tictoc::toc()
+
+# merge back
+abfs_to_process <- full_join(abfs_to_process, process_these_abfs)
+
+```
+
+Process gjccs
+```{r eval=FALSE, include=FALSE}
+tictoc::tic()
+
+process_these_abfs <- abfs_to_process %>% filter(ABFType == "gjcc")
+
+unique_abfs <- unique(process_these_abfs$File)
+
+# inelegant, but functional. 
+unique_abfs <- unique_abfs[!(unique_abfs %in% c(
+"190830_0033.abf",
+"190905_0018.abf",
+"190906_0032.abf",
+"190906_0050.abf",
+ "190907_0014.abf",
+"190918_0029.abf",
+"190924_0021.abf",
+"190924_0036.abf",
+"190924_0037.abf",
+"190926_0016.abf",
+"190927a_0014.abf",
+"190930_0012.abf",
+"191001_0016.abf",
+"191001_0017.abf"
+ # Error in UseMethod("rename_") : 
+ #  no applicable method for 'rename_' applied to an object of class "NULL" 
+))]
+
+# Add cols to fill
+process_these_abfs <- full_join(select(process_these_abfs, -Sweep), 
+                                expand.grid(Experiment = process_these_abfs$Experiment, 
+                                            Sweep = 1:5,
+                                            CC = NA,
+                                            R1 = NA,
+                                            R11 = NA,
+                                            R12 = NA,
+                                            Rc = NA,
+                                            Tau_est = NA,
+                                            Tau_std.err = NA,
+                                            Vrest = NA))
+
+
+
+for (i in seq_along(unique_abfs)){
+  print(i)
+  # process_these_abfs[process_these_abfs$File == unique_abfs[i], ]
+
+  current_file <- as.character(unlist(process_these_abfs[process_these_abfs$File == unique_abfs[i], "File"])[1])
+  ## Should we process the current ABF? ====
+  current_trace <- check_abf_expected(
+    exempt_ABF = force_process_ABF, 
+    dir_path = abf_dir_path,
+    file_name = current_file,
+    file_type = as.character(unlist(process_these_abfs[process_these_abfs$File == unique_abfs[i], "ABFType"])[1])
+  )
+  
+  
+  if (current_trace$process){
+    current_trace <- current_trace$trace
+    
+    
+    out <- process_gjcc_trace(trace = current_trace)
+    
+    out_df <- out$df 
+    out_df <- out_df %>% 
+      gather("key", "value", names(out_df)[names(out_df) != "Sweep"]) %>% 
+      mutate(key = str_replace_all(key, "In4_", replacement = "In4-"),
+             key = str_replace_all(key, "In9_", replacement = "In9-")) %>% 
+      separate(col = key, sep = "-", into = c("Ch", "DV")) %>% 
+      spread(key = "DV", value = "value") %>% 
+      mutate(File = current_file,
+             Sweep = as.numeric(Sweep)) %>% 
+      rename(Channel = Ch)
+    
+    
+    process_these_abfs <- full_join(process_these_abfs, out_df)
+
+    # Save for review:
+    # Estimates of Tau look poor.
+    save_plot(here("data", "data_audits", "gjcc", paste(str_remove(current_file, ".abf"), "gjcc", "trace.pdf", sep = "-")),
+              out$diagnostic_plots$trace, base_height = 7, base_width = 10)
+    
+    save_plot(here("data", "data_audits", "gjcc", paste(str_remove(current_file, ".abf"), "gjcc", "segment.pdf", sep = "-")),
+              out$diagnostic_plots$segment, base_height = 7, base_width = 10)
+    
+    save_plot(here("data", "data_audits", "gjcc", paste(str_remove(current_file, ".abf"), "gjcc", "fit_in4.pdf", sep = "-")),
+              out$diagnostic_plots$fit_In4, base_height = 7, base_width = 10)
+    
+    save_plot(here("data", "data_audits", "gjcc", paste(str_remove(current_file, ".abf"), "gjcc", "fit_in9.pdf", sep = "-")),
+              out$diagnostic_plots$fit_In9, base_height = 7, base_width = 10)
+    
+    
+         
+
+    
+  } 
+}
+
+process_these_abfs <- distinct(process_these_abfs) %>% filter(!is.na(R11))
+tictoc::toc()
+
+abfs_to_process <- full_join(
+  abfs_to_process, 
+  select(process_these_abfs, 
+         File, Channel, Sweep, CC, R1, R11, R12, Rc, Tau_est, Tau_std.err, Vrest)
+          )
+```
+
+
+## Backup Point
+```{r eval=FALSE, include=FALSE}
+save.image(file='myEnvironment.RData')
+load('myEnvironment.RData')
+```
+
+
+#### Data review:
+
+gjcc seems to predict bigger junctional conductance, R1 than gjvc would. 
+```{r eval=FALSE, include=FALSE}
+# abfs_to_process %>% 
+abfs_to_process %>% 
+  group_by(Experiment, Cell) %>% 
+  mutate(Ig = median(Ig, na.rm = T),
+         R1c = median(R1c, na.rm = T)) %>% #tail()
+  ggplot(aes(x = Rc^-1, y = abs(Ig)))+
+  geom_abline(slope = 1, intercept = 0, color = 'firebrick')+
+  # geom_line(data = data.frame(x = seq(1, 50, length.out = 100), y = seq(1, 50, length.out = 100)),
+  #                              aes(x=x,y=y), color = "firebrick")+
+  geom_point()
+  # coord_cartesian(x = c(0, 100))+
+  # scale_x_log10()
+
+
+
+abfs_to_process %>% 
+  group_by(Experiment, Cell) %>% 
+  mutate(Ig = median(Ig, na.rm = T),
+         R1c = median(R1c, na.rm = T)) %>% #tail()
+  unite(uid, Experiment, Cell) %>% 
+  ggplot(aes(x = R1, y = R1c, group = uid))+
+  # geom_line()+
+  geom_point()+
+  # geom_abline(slope = 1, intercept = 0, color = 'firebrick')+
+  geom_line(data = data.frame(x = seq(1, 13, length.out = 100), 
+                              y = seq(1, 13, length.out = 100),
+                              uid = "a"),
+  aes(x=x,y=y), color = "firebrick")+
+  
+  scale_x_log10()
+  # coord_cartesian(x = c(0, 100))
+```
+
+# Load same data measured manually ----
+
+## Voltage Clamp GJ Protocol
+```{r}
+
+ThresholdVoltage <- 4
+
+# Keep only those with steps greater than threshold
+ThresholdVector <- abs(tevc$R1S1Mean) >= ThresholdVoltage | abs(tevc$R1S3Mean) >= ThresholdVoltage 
+tevc <- tevc[ThresholdVector, ]
+
+# Look for the smallest deviation from baseline to find which cell is postsynaptic
+# if TRUE then S1 is the presynaptic cell
+tevc$S1Pre <- abs(tevc$R1S1Mean) >= abs(tevc$R1S3Mean)
+tevc$PreSyn <- ifelse(tevc$S1Pre, tevc$Signal1, tevc$Signal3)
+
+# Drop any rows where this wasn't a bool
+tevc <- tevc[!is.na(tevc$S1Pre), ]
+
+# conductance = i_post / delta_mV
+# Where S1Pre == T
+# c = R1S4Mean / R1S1Mean 
+# Otherwise 
+# c = R1S2Mean / R1S3Mean
+temp <- tevc %>% 
+  group_by(FileName, S1Pre) %>% 
+  mutate(Ig = ifelse(S1Pre, 
+                     abs(R1S4Mean / R1S1Mean), #abs to flip the current being used to prevent mV change into current coming across gj
+                     abs(R1S2Mean / R1S3Mean) 
+  )
+  ) %>% 
+  ungroup()
+
+# provide Median observation
+temp <- temp %>% 
+  select(FileName, S1Pre, R1S1Mean, R1S2Mean, R1S3Mean, R1S4Mean, Ig) %>% 
+  group_by(FileName, S1Pre) %>% 
+  mutate(MedianIg = median(Ig, na.rm = T)) %>% 
+  ungroup()
+
+# Merge back
+tevc <- full_join(tevc, temp)
+
+save(tevc, file = here("data", "tevc.rds"))
+```
+
+## Current Clamp GJ Protocol
+Bennet 1966's resistances:
+
+Apparant Cell resistances:
+$$r_{11}=\frac{v_1}{i_1}$$
+
+Transfer resistances:
+$$r_{12}=\frac{v_2}{i_1}$$
+
+Membrane resistance
+$$r_1= \frac{r_{11}*r_{22} - r_{12}^2}{r_{22} - r_{12}}$$
+
+Coupling resistance
+$$r_c = \frac{r_{11}*r_{22} - r_{12}^2}{r_{12}}$$
+
+```{r}
+ExperimentNames <- tecc$FileName %>% stringr::str_split(pattern = "_")
+ExperimentNames <- transpose(ExperimentNames)[[1]] %>% unlist()
+
+tecc$Experiment <- ExperimentNames
+```
+
+
+```{r}
+df = tecc
+v1 = "R1S1Mean"#"IN4_mean"
+i1 = "R1S3Mean"#"IN7_mean"
+v2 = "R1S4Mean"#"IN9_mean"
+i2 = "R1S6Mean"#"IN12_mean"
+exp = "Experiment"
+rec = "FileName"
+
+# Grouping prevents this from working.
+df <- ungroup(df)
+
+df <- df %>% mutate(cell = ifelse(abs(R1S3Mean) > abs(R1S6Mean), "a", "b"))
+
+## Set up selection vectors for when i1 (e.g. IN7) is being used to inject current
+inj_i1 <- abs(df[[i1]]) > abs(df[[i2]])
+inj_i2 <- abs(df[[i1]]) < abs(df[[i2]])
+## figure out coupling coef
+df[inj_i1, "cc"] <- df[inj_i1, v2] / df[inj_i1, v1] #when inj IN7
+df[inj_i2, "cc"] <- df[inj_i2, v1] / df[inj_i2, v2] #when inj IN12
+## figure out input resistance ====
+df[inj_i1, "r11"] <- df[inj_i1, v1] / df[inj_i1, i1] #when inj IN7
+df[inj_i2, "r11"] <- df[inj_i2, v2] / df[inj_i2, i2] #when inj IN12
+## figure out transfer resistance ====
+df[inj_i1, "r12"] <- df[inj_i1, v2] / df[inj_i1, i1]
+df[inj_i2, "r12"] <- df[inj_i2, v1] / df[inj_i2, i2]
+
+## figure out membrane resist and coupling resist for both cells ====
+temp <- df %>%
+  dplyr::select(
+    exp, rec, cell, r11, r12
+  ) %>%
+  group_by(Experiment, FileName, cell) %>% 
+  # mutate(cell = ifelse(inj_i1, "cell1", "cell2")) %>%
+  mutate(r11 = median(r11, na.rm = T),
+         r12 = median(r12, na.rm = T)) %>% 
+  distinct() %>% 
+  ungroup() %>% 
+  pivot_wider(names_from = cell,
+              values_from = c("r11", "r12")
+  ) %>%
+  mutate(r1_a = ((r11_a*r11_b) - (r12_a^2)) / (r11_b - r12_a)) %>%
+  mutate(r1_b = ((r11_b*r11_a) - (r12_b^2)) / (r11_a - r12_b)) %>%
+  mutate(rc_a = ((r11_a*r11_b) - (r12_a^2)) / (r12_a)) %>%
+  mutate(rc_b = ((r11_b*r11_a) - (r12_b^2)) / (r12_b)) %>%
+  pivot_longer(
+    -c(exp, rec),
+    names_to = c(".value", "cell"),
+    names_sep = "_",
+    values_drop_na = TRUE
+  )
+
+# collapse df to medians
+df <- df[, c(
+  "Experiment", "cell", 
+  "FileName", 
+  # "Trace", "TraceStart", 
+  "Signal1", "Signal2", "Signal3", "Signal4", "Signal5", "Signal6", 
+  # "Region1", "StartTime", "EndTime", 
+  "R1S1Mean", "R1S2Mean", "R1S3Mean", "R1S4Mean", "R1S5Mean", "R1S6Mean", 
+  "R1S1Baseline", "R1S2Baseline", "R1S3Baseline", "R1S4Baseline", "R1S5Baseline", "R1S6Baseline", 
+  # "FilePath", 
+  "cc"#, 
+  # "r11", "r12"
+)] %>% 
+  group_by(Experiment, cell, FileName) %>% 
+  mutate(R1S1Mean = median(R1S1Mean, na.rm = T),
+         R1S2Mean = median(R1S2Mean, na.rm = T),
+         R1S3Mean = median(R1S3Mean, na.rm = T),
+         R1S4Mean = median(R1S4Mean, na.rm = T),
+         R1S5Mean = median(R1S5Mean, na.rm = T),
+         R1S6Mean = median(R1S6Mean, na.rm = T),
+         
+         R1S1Baseline = median(R1S1Baseline, na.rm = T),
+         R1S2Baseline = median(R1S2Baseline, na.rm = T),
+         R1S3Baseline = median(R1S3Baseline, na.rm = T),
+         R1S4Baseline = median(R1S4Baseline, na.rm = T),
+         R1S5Baseline = median(R1S5Baseline, na.rm = T),
+         R1S6Baseline = median(R1S6Baseline, na.rm = T),
+         
+         cc = median(cc, na.rm = T),
+  ) %>% 
+  distinct() %>% 
+  ungroup()
+
+# Merge
+df <- full_join(df, temp) %>% dplyr::select(-cell)
+
+tecc <- df
+```
+
+```{r}
+save(tecc, file = here("data", "tecc.rds"))
+```
+
+
+## Contrast manual and automatic estimates
+```{r eval=FALSE, include=FALSE}
+small_tecc <- tecc %>% 
+  mutate(PreSyn = case_when(
+    (abs(R1S3Mean) > abs(R1S6Mean)) ~ Signal1, 
+    (abs(R1S3Mean) < abs(R1S6Mean)) ~ Signal4
+    ),
+    vrest = case_when(
+    (abs(R1S3Mean) > abs(R1S6Mean)) ~ R1S1Baseline, 
+    (abs(R1S3Mean) < abs(R1S6Mean)) ~ R1S4Baseline
+    )) %>% 
+  mutate(PreSyn = case_when(
+    PreSyn == "IN 9" ~ "In9",
+    PreSyn == "IN 4" ~ "In4"
+  )) %>% 
+  select(FileName, PreSyn, vrest, #Signal1, Signal4, R1S1Baseline, R1S4Baseline, 
+         cc, r11, r12, r1, rc) %>% 
+  distinct() %>% 
+  rename(Channel = PreSyn,
+         File = FileName)
+
+
+small_tevc <- tevc %>% 
+  select(FileName, PreSyn, MedianIg) %>% 
+  distinct() %>% 
+  mutate(PreSyn = case_when(
+    PreSyn == "IN 9" ~ "In9",
+    PreSyn == "IN 4" ~ "In4"
+  )) %>% 
+  rename(Channel = PreSyn,
+         ig = MedianIg,
+         File = FileName)
+
+
+small_abf_automatic <- abfs_to_process %>%
+  select(-Experiment, -ABFType, -Sweep, -Processed, -Tau_est, -Tau_std.err) %>% 
+  group_by(File) %>% 
+  mutate_at(.vars = c("Ig", "R1c", "CC", "R1", "R11", "R12", "Rc", "Vrest"), 
+            median, na.rm = T) %>% 
+  distinct() 
+
+  
+small_all <- full_join(full_join(small_abf_automatic, small_tecc), small_tevc)
+
+small_all <- small_all[, c("File", "Channel", "Cell", 
+                           "CC", "cc", "R1", "r1", "R11", "r11", "R12", "r12", "Rc", "rc", "Vrest", "vrest", 
+                           "Ig", "ig", "R1c")]
+```
+
+
+```{r eval=FALSE, include=FALSE}
+# several very extreme estimates
+comp_cc <-
+small_all %>% 
+  ggplot(aes(x = CC, y = cc))+
+  geom_ribbon(aes(ymin = 0, ymax = CC), fill = "cornflowerblue", alpha = 0.5)+
+  geom_point()+
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
+  # labs(subtitle = "Automated == x, Manual == y")
+
+comp_r1 <-
+small_all %>% 
+  ggplot(aes(x = R1, y = r1))+
+  geom_ribbon(aes(ymin = 0, ymax = R1), fill = "firebrick", alpha = 0.5)+
+  geom_point()+
+  coord_cartesian(xlim = c(0, 75), ylim = c(0, 75))
+
+comp_r11 <-
+small_all %>% 
+  ggplot(aes(x = R11, y = r11))+
+  geom_ribbon(aes(ymin = 0, ymax = R11), fill = "firebrick", alpha = 0.5)+
+  geom_point()+
+  coord_cartesian(xlim = c(0, 20))
+
+comp_r12 <-
+small_all %>% 
+  ggplot(aes(x = R12, y = r12))+
+  geom_ribbon(aes(ymin = 0, ymax = R12), fill = "slateblue", alpha = 0.5)+
+  geom_point()+
+  coord_cartesian(xlim = c(0, 15))
+
+comp_rc <-
+small_all %>% 
+  ggplot(aes(x = Rc, y = rc))+
+  geom_ribbon(aes(ymin = 0, ymax = Rc), fill = "cornflowerblue", alpha = 0.5)+
+  geom_point()+
+  coord_cartesian(ylim = c(0, 125))
+
+comp_vrest <-
+small_all %>% 
+  ggplot(aes(x = Vrest, y = vrest))+
+  geom_ribbon(aes(ymin = -60, ymax = Vrest), fill = "forestgreen", alpha = 0.5)+
+  geom_point()
+
+comp_ig <-
+small_all %>% 
+  ggplot(aes(x = abs(Ig), y = ig))+
+  geom_ribbon(aes(ymin = 0, ymax = abs(Ig)), fill = "cornflowerblue", alpha = 0.5)+
+  geom_point()
+
+
+(comp_cc / comp_r12) | (comp_rc / comp_ig) | (comp_vrest / ggplot()) | (comp_r1 / comp_r11)
+```
+
+## How big of an effect does changing tau have on the predicted voltage?
+```{r eval=FALSE}
+current_trace <- check_abf_expected(
+  exempt_ABF = force_process_ABF,
+  dir_path = abf_dir_path,
+  file_name = "190808a_0014.abf",
+  file_type = "epsp"
+)
+
+# # A tibble: 1 x 5
+#   Experiment  Cell Channel   Rin   Tau
+#   <chr>      <dbl> <chr>   <dbl> <dbl>
+# 1 190808a        4 In4      14.3 -11.8
+
+current_trace <- current_trace$trace
+
+out <- predict_epsp_responses(trace = current_trace,
+                              tau = 11.8,
+                              rin = 14.3,
+                              v_ch = "In4",
+                              i_ch = "In7")
+
+out <- out$predictions
+out <- out[[1]]
+
+prediction <- out$predicted - out$offset
+
+trial_taus <- c(1, 10, 20, 30, 99)#seq(1, 99, length.out = 10)
+predicted_voltages <- map(trial_taus, function(in_tau){
+  
+  out <- predict_epsp_responses(trace = current_trace,
+                              tau = in_tau,
+                              rin = 14.3,
+                              v_ch = "In4",
+                              i_ch = "In7")
+
+  out <- out$predictions
+  out <- out[[1]]
+  
+  prediction <- out$predicted - out$offset
+  return(prediction)
+  
+})
+
+predicted_voltages_df <- do.call(cbind, predicted_voltages)
+predicted_voltages_df <- as.data.frame(predicted_voltages_df)
+
+names(predicted_voltages_df) <- as.character(trial_taus)
+
+predicted_voltages_df$Time <- current_trace[current_trace$Sweep == 1, ]$Time
+
+predicted_voltages_df_plt <- downsample_data(predicted_voltages_df, len = 1000) %>% 
+  gather(key = "key", value = "value", names(predicted_voltages_df)[!(names(predicted_voltages_df)  %in% c("Time"))])
+
+
+predicted_voltages_df_plt %>% 
+  # filter(key %in% c(1, 10)) %>% 
+  ggplot(aes(x= Time, y = value, color = key))+
+  geom_line()
+  # scale_colour_viridis_d()+
+  # theme_gray()
+  # facet_wrap(.~key)
+
+
+
+
+predicted_voltages_df_plt %>% 
+  mutate(key = paste0("t", key)) %>% 
+  spread(key, value) %>% 
+  ggplot(aes(x= Time))+
+  geom_ribbon(aes(ymin=t1, ymax=t99), fill = "firebrick")+
+  geom_line(aes(y = t99), color = "cornflowerblue")+
+  geom_line(aes(y = t1))+
+  labs(title = "tau 1 vs 100")
+
+
+
+predicted_voltages_df_plt %>% 
+  mutate(key = paste0("t", key)) %>% 
+  spread(key, value) %>% 
+  ggplot(aes(x= Time))+
+  geom_ribbon(aes(ymin=t20, ymax=t30), fill = "firebrick")+
+  geom_line(aes(y = t30), color = "cornflowerblue")+
+  geom_line(aes(y = t20))+
+  labs(title = "tau 20 vs 30")
+
+
+
+plt_assignments <- expand.grid(col = trial_taus, row = trial_taus)
+
+plt_contrast_list <- map(seq(1, nrow(plt_assignments)), function(i){
+  predicted_voltages_df_plt %>% 
+  mutate(key = paste0("t", key)) %>% 
+  spread(key, value) %>% 
+  # ggplot(aes_string(x= "t1", "t10"))+
+  ggplot(aes_string(x = paste0("t", as.character(plt_assignments[i, "col"])), 
+                    y = paste0("t", as.character(plt_assignments[i, "row"]))))+
+  # ggplot(aes_string(x= as.character(plt_assignments[i, "col"]), y = as.character(plt_assignments[i, "row"])))+
+    geom_point(alpha = 0.3)+
+      geom_abline(intercept = 0, slope = 1, color = "firebrick", size = 1)+
+    coord_cartesian(x = c(-70, 0), y = c(-70, 0))
+})
+
+
+cowplot::plot_grid(plotlist = plt_contrast_list, nrow = 5, ncol = 5)
+
+
+
+
+
+temp <- predicted_voltages_df_plt %>%
+  mutate(key = paste0("t", key)) %>% 
+  spread(key, value) %>% 
+  select(-Time)
+
+temp_summary <- expand.grid(names(temp), names(temp))
+temp_summary$mean <- NA
+temp_summary$median <- NA
+temp_summary$sd <- NA
+temp_summary$iqr <- NA
+temp_summary$sum <- NA
+
+for (i in 1:nrow(temp_summary)){
+temp_array <- temp[, temp_summary[i, "Var1"]] - temp[, temp_summary[i, "Var2"]]
+
+temp_summary[i, "mean"] <- mean(temp_array) %>% round(digits = 2)
+temp_summary[i, "median"] <- median(temp_array) %>% round(digits = 2)
+temp_summary[i, "sd"] <- sd(temp_array) %>% round(digits = 2)
+temp_summary[i, "iqr"] <- IQR(temp_array) %>% round(digits = 2)
+temp_summary[i, "sum"] <- sum(temp_array) %>% round(digits = 2)
+  
+}
+
+heatmap_list <- map(c("mean", "median", "sd", "iqr", "sum"), function(i){
+  
+temp_summary %>% 
+  gather(key, value, c("mean", "median", "sd", "iqr", "sum")) %>% 
+  filter(key == i) %>% 
+  # ggplot(aes(x = Var1, y = Var2, fill = mean, label = mean))+
+  ggplot(aes(x = Var1, y = Var2, fill = value, label = value))+
+  geom_tile()+
+  geom_text()+
+  scale_fill_gradient2()+
+  facet_wrap(.~key)
+})
+
+plot_grid(plotlist = heatmap_list)
+
+heatmap_list[[5]]
+
+
+# plt_contrast_list_hex <- map(seq(1, nrow(plt_assignments)), function(i){
+#   predicted_voltages_df_plt %>% 
+#     mutate(key = paste0("t", key)) %>% 
+#     spread(key, value) %>% 
+#     # ggplot(aes_string(x= "t1", "t10"))+
+#     ggplot(aes_string(x = paste0("t", as.character(plt_assignments[i, "col"])), 
+#                       y = paste0("t", as.character(plt_assignments[i, "row"]))))+
+#     # ggplot(aes_string(x= as.character(plt_assignments[i, "col"]), y = as.character(plt_assignments[i, "row"])))+
+#     # geom_point(alpha = 0.3)+
+#     # geom_hex()+
+#     # geom_density2d()+
+#     
+#     # scale_fill_continuous(type = "viridis")+
+#     # theme(legend.position = "")
+#     stat_density_2d(aes(fill = ..density..), geom = "raster", contour = FALSE) +
+#     scale_fill_distiller(palette=4, direction=1) +
+#     scale_x_continuous(expand = c(0, 0)) +
+#     scale_y_continuous(expand = c(0, 0)) +
+#     theme(
+#       legend.position='none'
+#     )+
+#     geom_abline(intercept = 0, slope = 1, color = "firebrick", size = 1)+
+#   coord_cartesian(x = c(-70, 0), y = c(-70, 0))
+# })
+# 
+# 
+# cowplot::plot_grid(plotlist = plt_contrast_list_hex, nrow = 5, ncol = 5)
+```
+
+
+##Repeat pattern for epsp
+
+```{r}
+tictoc::tic()
+# Find all the cells for which we have the needed resistance
+process_these_abfs <- abfs_to_process %>% filter(ABFType == "epsp")
+
+## collect needed input (rin) for epsp ====
+temp <- tecc %>%
+  mutate(PreSyn = case_when(
+    (abs(R1S3Mean) > abs(R1S6Mean)) ~ Signal1, 
+    (abs(R1S3Mean) < abs(R1S6Mean)) ~ Signal4
+  )) %>% 
+  mutate(PreSyn = case_when(
+    PreSyn == "IN 9" ~ "In9",
+    PreSyn == "IN 4" ~ "In4"
+  )) %>% 
+  select(FileName, PreSyn, r11, r1) %>% 
+  distinct() %>% 
+  rename(Channel = PreSyn,
+         File = FileName) 
+
+temp_metadata <- metadata %>% 
+  mutate(num_zeros = str_length(Recording)) %>% 
+  mutate(num_zeros = ifelse(num_zeros == 1, "000", 
+                            ifelse(num_zeros == 2, "00", 
+                                   ifelse(num_zeros == 3, "0", NA)))) %>% 
+  mutate(File = paste0(Experiment, "_", num_zeros, as.character(Recording), ".abf" )) %>% 
+  select(-num_zeros)
+
+temp <- left_join(temp, temp_metadata) %>% 
+  mutate(Cell = case_when(Channel == "In4" ~ In4, 
+                          Channel == "In9" ~ In9)) %>% 
+  select(Experiment, Channel, Cell, r11, r1) %>%
+  group_by(Experiment, Channel, Cell) %>% 
+  mutate(r11 = median(r11, na.rm = T), r1 = median(r1, na.rm = T)) %>% 
+  distinct() %>% 
+  ungroup()
+
+## produce reference dfs ====
+all_cell_params <- full_join(temp, process_these_abfs) %>% mutate(Rin = r11)
+
+all_cell_params <- all_cell_params %>% 
+  ungroup() %>%
+  filter(!is.na(Experiment) & !is.na(Cell)) %>% 
+  distinct()
+
+# Based on the above analysis -- that tau within an expected band has a mean effect of ~.1mV or less on the 
+HARDCODED_TAU <- 25
+  
+# unique_abfs <- "190808a_0014.abf"
+unique_abfs <- process_these_abfs[process_these_abfs$Experiment %in% all_cell_params$Experiment, ]$File
+  
+## Simulate each cell ====
+for (i in seq_along(unique_abfs)){
+  tictoc::tic()
+  print(i)
+  
+  current_file <- as.character(unlist(process_these_abfs[process_these_abfs$File == unique_abfs[i], "File"])[1])
+  ## Should we process the current ABF? ====
+  current_trace <- check_abf_expected(
+    exempt_ABF = force_process_ABF,
+    dir_path = abf_dir_path,
+    file_name = current_file,
+    file_type = as.character(unlist(process_these_abfs[process_these_abfs$File == unique_abfs[i], "ABFType"])[1])
+  )
+  
+  if (current_trace$process){
+  current_trace <- current_trace$trace
+    
+  # handle cells sequentially
+  unique_cells <- unlist(process_these_abfs[process_these_abfs$File == unique_abfs[i], ]$Cell)
+  unique_cells <- unique_cells[!is.na(unique_cells)]
+  
+  for (j in seq_along(unique_cells)){
+    current_cell <- unique_cells[j]
+    current_cell_params <- all_cell_params[all_cell_params$File == current_file &
+      all_cell_params$Experiment == unlist(str_split(current_file, pattern = "_"))[1] &
+                                             all_cell_params$Cell == unique_cells[j], ] %>% 
+      distinct()
+    
+    if(nrow(current_cell_params) > 1){
+      warning("current_cell_params contains more than one row! Retaining only the first row.")
+      current_cell_params <- current_cell_params[1, ]
+    }
+    
+    if (nrow(current_cell_params)==1){ # if there are no acceptable parameters, current_cell_params will be nrow == 0 
+      
+        
+        
+        if (unlist(current_cell_params[, "Channel"]) == "In4"){
+          out <- predict_epsp_responses(trace = current_trace,
+                                        tau = HARDCODED_TAU, #abs(as.numeric(unlist(current_cell_params[, "Tau"]))),
+                                        rin = as.numeric(unlist(current_cell_params[, "Rin"])),
+                                        v_ch = "In4",
+                                        i_ch = "In7")
+          
+          # Save for review:
+          saveRDS(current_trace[, c("In4", "In7", "Sweep", "Time")], 
+                  here("data", "predicted_voltage", paste(
+                    str_remove(current_file, ".abf"), "epsp", "In4", "actual_v.rds", sep = "-")))
+          
+          saveRDS(out$predictions, 
+                  here("data", "predicted_voltage", paste(
+                    str_remove(current_file, ".abf"), "epsp", "In4", "predict_v.rds", sep = "-")))
+          
+          
+          
+          
+          save_plot(here("data", "data_audits", "epsp", paste(
+            str_remove(current_file, ".abf"), "epsp", "In4", "segment.pdf", sep = "-")),
+            out$diagnostic_plots$trace, base_height = 7, base_width = 10)
+          
+          
+        } else if (unlist(current_cell_params[, "Channel"]) == "In9"){
+          out <- predict_epsp_responses(trace = current_trace,
+                                        tau = HARDCODED_TAU, #abs(as.numeric(unlist(current_cell_params[, "Tau"]))),
+                                        rin = as.numeric(unlist(current_cell_params[, "Rin"])),
+                                        v_ch = "In9",
+                                        i_ch = "In12")
+          
+          # Save for review:
+          saveRDS(current_trace[, c("In9", "In12", "Sweep", "Time")], 
+                  here("data", "predicted_voltage", paste(
+                    str_remove(current_file, ".abf"), "epsp", "In9", "actual_v.rds", sep = "-")))
+          
+          saveRDS(out$predictions, 
+                  here("data", "predicted_voltage", paste(
+                    str_remove(current_file, ".abf"), "epsp", "In9", "predict_v.rds", sep = "-")))
+          
+          save_plot(here("data", "data_audits", "epsp", paste(
+            str_remove(current_file, ".abf"), "epsp", "In9", "segment.pdf", sep = "-")),
+            out$diagnostic_plots$trace, base_height = 7, base_width = 10)
+        }
+      }
+    }
+  }
+  tictoc::toc()
+}
+
+tictoc::toc()
+
+```
+
+```{r}
+
+
+# # unique_abfs <- unique(process_these_abfs$File)
+# # 
+# # # inelegant, but functional. 
+# # unique_abfs <- unique_abfs[!(unique_abfs %in% c(
+# # 
+# # ))]
+# 
+# 
+# 
+# #FIXME all of the abfs should have complete information. 190830 has cell == NA. 
+# all_cell_params <- abfs_to_process[abs(abfs_to_process$Tau_est) < 60 & abs(abfs_to_process$Tau_est) > 15 , ] %>% 
+#   filter(!is.na(Tau_est)) %>% 
+#   group_by(Experiment, Cell) %>% 
+#   summarise(
+#     Experiment = Experiment,
+#     Cell = Cell,
+#     Channel = Channel,
+#     Rin = median(R11, na.rm = T),
+#     Tau = median(Tau_est, na.rm = T)) 
+# 
+# all_cell_params <- all_cell_params %>% 
+#   ungroup() %>%
+#   filter(!is.na(Experiment) & !is.na(Cell)) %>% 
+#   distinct()
+#   
+# 
+# # unique_abfs <- "190808a_0014.abf"
+# unique_abfs <- process_these_abfs[process_these_abfs$Experiment %in% all_cell_params$Experiment, ]$File
+# 
+# 
+# 
+# 
+# # current_cell_params
+# # 
+# #   
+# #   
+# # current_cell_params <- filter(abfs_to_process, Experiment == "190808a", Cell == 4) %>% #FIXME
+# #   summarise(
+# #     Experiment = Experiment,
+# #     Cell = Cell,
+# #     Channel = Channel,
+# #     Rin = median(R11, na.rm = T),
+# #     Tau = median(Tau_est, na.rm = T)) %>% 
+# #   distinct()
+# 
+# # # A tibble: 1 x 5
+# #   Experiment  Cell Channel   Rin   Tau
+# #   <chr>      <dbl> <chr>   <dbl> <dbl>
+# # 1 190808a        4 In4      14.3 -11.8
+# 
+# 
+# # is that didn't work 5, 6, 7
+# 
+# # [1] 7
+# # Error in names(input.df) <- c("Time", "Inj") : 
+# #   attempt to set an attribute on NULL
+# # In addition: Warning message:
+# #  Error in names(input.df) <- c("Time", "Inj") : 
+# #   attempt to set an attribute on NULL 
+# 
+# #FIXME only In4 seems to be processed?
+# for (i in seq(8, 34)){#seq_along(unique_abfs)){
+#   print(i)
+#   
+#   current_file <- as.character(unlist(process_these_abfs[process_these_abfs$File == unique_abfs[i], "File"])[1])
+#   ## Should we process the current ABF? ====
+#   current_trace <- check_abf_expected(
+#     exempt_ABF = force_process_ABF,
+#     dir_path = abf_dir_path,
+#     file_name = current_file,
+#     file_type = as.character(unlist(process_these_abfs[process_these_abfs$File == unique_abfs[i], "ABFType"])[1])
+#   )
+#   
+#   if (current_trace$process){
+#   # handle cells sequentially
+#   unique_cells <- unlist(process_these_abfs[process_these_abfs$File == unique_abfs[i], ]$Cell)
+#   
+#   for (j in seq_along(unique_cells)){
+#     current_cell <- unique_cells[j]
+#     current_cell_params <- all_cell_params[all_cell_params$Experiment == unlist(str_split(current_file, pattern = "_"))[1]&
+#                                              all_cell_params$Cell == unique_cells[j], ] %>% 
+#       distinct()
+#     
+#     if(nrow(current_cell_params) > 1){
+#       warning("current_cell_params contains more than one row! Retaining only the first row.")
+#       current_cell_params <- current_cell_params[1, ]
+#     }
+#     
+#     if (nrow(current_cell_params)==1){ # if there are no acceptable parameters, current_cell_params will be nrow == 0 
+#       
+#         current_trace <- current_trace$trace
+#         
+#         if (unlist(current_cell_params[, "Channel"]) == "In4"){
+#           out <- predict_epsp_responses(trace = current_trace,
+#                                         tau = HARDCODED_TAU, #abs(as.numeric(unlist(current_cell_params[, "Tau"]))),
+#                                         rin = as.numeric(unlist(current_cell_params[, "Rin"])),
+#                                         v_ch = "In4",
+#                                         i_ch = "In7")
+#           
+#           # Save for review:
+#           saveRDS(current_trace[, c("In4", "In7", "Sweep", "Time")], 
+#                   here("data", "predicted_voltage", paste(
+#                     str_remove(current_file, ".abf"), "epsp", "In4", "actual_v.rds", sep = "-")))
+#           
+#           saveRDS(out$predictions, 
+#                   here("data", "predicted_voltage", paste(
+#                     str_remove(current_file, ".abf"), "epsp", "In4", "predict_v.rds", sep = "-")))
+#           
+#           
+#           
+#           
+#           save_plot(here("data", "data_audits", "epsp", paste(
+#             str_remove(current_file, ".abf"), "epsp", "In4", "segment.pdf", sep = "-")),
+#             out$diagnostic_plots$trace, base_height = 7, base_width = 10)
+#           
+#           
+#         } else if (unlist(current_cell_params[, "Channel"]) == "In9"){
+#           out <- predict_epsp_responses(trace = current_trace,
+#                                         tau = HARDCODED_TAU, #abs(as.numeric(unlist(current_cell_params[, "Tau"]))),
+#                                         rin = as.numeric(unlist(current_cell_params[, "Rin"])),
+#                                         v_ch = "In9",
+#                                         i_ch = "In12")
+#           
+#           # Save for review:
+#           saveRDS(current_trace[, c("In9", "In12", "Sweep", "Time")], 
+#                   here("data", "predicted_voltage", paste(
+#                     str_remove(current_file, ".abf"), "epsp", "In9", "actual_v.rds", sep = "-")))
+#           
+#           saveRDS(out$predictions, 
+#                   here("data", "predicted_voltage", paste(
+#                     str_remove(current_trace, ".abf"), "epsp", "In9", "predict_v.rds", sep = "-")))
+#           
+#           save_plot(here("data", "data_audits", "epsp", paste(
+#             str_remove(current_trace, ".abf"), "epsp", "In9", "segment.pdf", sep = "-")),
+#             out$diagnostic_plots$trace, base_height = 7, base_width = 10)
+#         }
+#       }
+#     }
+#   }
+# }
+# 
+# tictoc::toc()
+# 
+# # for (i in seq_along(unique_abfs)){
+# #   print(i)
+# #   # process_these_abfs[process_these_abfs$File == unique_abfs[i], ]
+# # 
+# #   current_file <- as.character(unlist(process_these_abfs[process_these_abfs$File == unique_abfs[i], "File"])[1])
+# #   ## Should we process the current ABF? ====
+# #   current_trace <- check_abf_expected(
+# #     exempt_ABF = force_process_ABF, 
+# #     dir_path = abf_dir_path,
+# #     file_name = current_file,
+# #     file_type = as.character(unlist(process_these_abfs[process_these_abfs$File == unique_abfs[i], "ABFType"])[1])
+# #   )
+# #   
+# #   
+# #   if (current_trace$process){
+# #     current_trace <- current_trace$trace
+# #     
+# #     
+# #     out <- process_gjcc_trace(trace = current_trace)
+# #     
+# #     out_df <- out$df 
+# #     out_df <- out_df %>% 
+# #       gather("key", "value", names(out_df)[names(out_df) != "Sweep"]) %>% 
+# #       mutate(key = str_replace_all(key, "In4_", replacement = "In4-"),
+# #              key = str_replace_all(key, "In9_", replacement = "In9-")) %>% 
+# #       separate(col = key, sep = "-", into = c("Ch", "DV")) %>% 
+# #       spread(key = "DV", value = "value") %>% 
+# #       mutate(File = current_file,
+# #              Sweep = as.numeric(Sweep)) %>% 
+# #       rename(Channel = Ch)
+# #     
+# #     
+# #     process_these_abfs <- full_join(process_these_abfs, out_df)
+# # 
+# #     
+# #     
+# #     
+# #     # Save for review:
+# #     # Estimates of Tau look poor.
+# #     save_plot(here("data", "data_audits", "gjcc", paste(str_remove(current_file, ".abf"), "gjcc", "trace.pdf", sep = "-")),
+# #               out$diagnostic_plots$trace, base_height = 7, base_width = 10)
+# #     
+# #     save_plot(here("data", "data_audits", "gjcc", paste(str_remove(current_file, ".abf"), "gjcc", "segment.pdf", sep = "-")),
+# #               out$diagnostic_plots$segment, base_height = 7, base_width = 10)
+# #     
+# #     save_plot(here("data", "data_audits", "gjcc", paste(str_remove(current_file, ".abf"), "gjcc", "fit_in4.pdf", sep = "-")),
+# #               out$diagnostic_plots$fit_In4, base_height = 7, base_width = 10)
+# #     
+# #     save_plot(here("data", "data_audits", "gjcc", paste(str_remove(current_file, ".abf"), "gjcc", "fit_in9.pdf", sep = "-")),
+# #               out$diagnostic_plots$fit_In9, base_height = 7, base_width = 10)
+# #     
+# #     
+# #          
+# # 
+# #     
+# #   } 
+# # }
+# # 
+# # process_these_abfs <- distinct(process_these_abfs) %>% filter(!is.na(R11))
+# # tictoc::toc()
+# # 
+# # 
+# # 
+# # # abfs_to_process <- full_join(abfs_to_process, 
+# # #           process_these_abfs) 
+# # 
+# # full_join(abfs_to_process, 
+# #           process_these_abfs) 
+# # 
+# # process_these_abfs[is.na(process_these_abfs$Experiment), ]
+# # 
+# # 
+# # t1 <- abfs_to_process %>% filter(File == "190808a_0019.abf")
+# # t2 <- process_these_abfs %>% filter(File == "190808a_0019.abf")
+# # 
+# # 
+# # full_join(t1, 
+# #           select(t2, 
+# #                  File, Channel, Sweep, CC, R1, R11, R12, Rc, Tau_est, Tau_std.err, Vrest)
+# #           ) %>% tail()
+# # 
+# # 
+# # 
+# # abfs_to_process <- full_join(
+# #   abfs_to_process, 
+# #   select(process_these_abfs, 
+# #          File, Channel, Sweep, CC, R1, R11, R12, Rc, Tau_est, Tau_std.err, Vrest)
+# #           )
+# # # merge back
+# # # abfs_to_process <- full_join(abfs_to_process, mutate(, Sweep = as.character(Sweep)))
+
+```
+
+
+
+Calculate summary metrics from epsp
+workspace -- getting metrics from epsp
+```{r eval=FALSE}
+
+# Goal: extract Absolute measures and differential measures for 
+# 1. Burst Amplitude (max mV)
+# 2. AUC 
+# 3. Stimulus correlation (between)
+
+
+# read in trace
+brian2_trace_files <- list.files(here("data", "predicted_voltage"))
+brian2_trace_files <- brian2_trace_files[stringr::str_ends(brian2_trace_files, ".*.rds")]
+
+brian2_trace_sets <- brian2_trace_files %>% 
+  str_remove(pattern = "-actual_v.rds") %>% 
+  str_remove(pattern = "-predict_v.rds") %>% 
+  unique()
+
+epsp_summary_list <- map(seq(1, length(brian2_trace_sets)), function(i){
+  print(i)
+  brian2_read_in <- brian2_trace_files[str_detect(brian2_trace_files, brian2_trace_sets[i])]
+  
+
+  # retrieve data and merge into a single df
+  temp <- map(brian2_read_in, function(read_file){
+    temp_predict <- readRDS(here("data", "predicted_voltage", read_file))
+    
+    if(str_detect(read_file, pattern = "predict_v")){
+      #consolidate into one df
+      for (j in seq(1, length(temp_predict))){
+        temp_predict[[j]]$Sweep <- j
+      }
+      temp_predict <- do.call(rbind, temp_predict)
+    }
+    return(temp_predict)
+  })
+  
+  names(temp) <- brian2_read_in
+  
+  temp_a <- temp[str_detect(names(temp), pattern = "actual_v")][[1]]
+  temp_p <- temp[str_detect(names(temp), pattern = "predict_v")][[1]] %>% as.data.frame() %>% as_tibble()
+  temp_a$nrow <- seq(1, nrow(temp_a))
+  temp_p$nrow <- seq(1, nrow(temp_p))
+  temp_a$Sweep <- as.character(temp_a$Sweep)
+  temp_p$Sweep <- as.character(temp_p$Sweep)
+  
+  temp <- full_join(temp_a, select(temp_p, -Time)) %>% select(-nrow)
+  
+  # Show difference between expected/actual
+  # i = 1
+  # [1] "190808a_0014-epsp-In4-actual_v.rds"  "190808a_0014-epsp-In4-predict_v.rds" shows why we need to be able to audit the outcome.
+  # Here the end of sweep 4 deviates from baseline so the delta is off
+  # TODO instead of subtracting a value at the end, we should look at the times with i_inj less than x and then use a percentile from that to estimate the baseline.
+  
+
+  # To get around this in the short term we'll calulate the factors independently for expected/obs
+  # downsample_data(temp, len = 10000) %>% 
+  # # temp %>% 
+  #   mutate(predicted = predicted - offset) %>% 
+  #   mutate(difference = In4-predicted) %>% 
+  #   ggplot(aes(x = Time))+
+  #   geom_ribbon(aes(ymin=In4, ymax=predicted), fill = "cornflowerblue")+
+  #   geom_line(aes(y=In4), color = "black")+
+  #   geom_line(aes(y=predicted), color = "cornflowerblue", alpha = 0.3)+
+  #   # geom_line(aes(y=difference-offset), color = "purple")+
+  #   facet_grid(Sweep~.)
+  
+  # This is an inelegant workaround for data that is based on in9/12. This prevents duplication of the large set below
+  
+  rewrite_names <- F
+  if ("In9" %in% names(temp)){
+    names(temp) <- c("In4", "In7", "Sweep", "Time", "predicted", "offset")
+    rewrite_names <- T
+  }
+  
+  # begin to work with data proper
+  # Add optional ways to slice the data based on what we expect to occur
+  # At the moment we leave this unused
+  temp_processed <- temp %>% 
+    mutate(
+      Period = case_when(
+        Time > 0.40  & Time <  4.87  ~ "A",
+        Time > 4.87  & Time < 10.74  ~ "B",
+        Time > 10.74 & Time < 16.74  ~ "C",
+        Time > 16.74 & Time < 19.685 ~ "D"
+      ),
+      Period_eq = case_when(
+        Time > 0.40  & Time <  0.40 + 2.945 ~ "A",
+        Time > 4.87  & Time <  4.87 + 2.945 ~ "B",
+        Time > 10.74 & Time < 10.74 + 2.945 ~ "C",
+        Time > 16.74 & Time < 16.74 + 2.945 ~ "D"
+      ),
+      Burst = case_when(
+        Time > 0.40  & Time <  2    ~ "A",
+        Time > 4.87  & Time <  6.17 ~ "B",
+        Time > 10.74 & Time < 12.54 ~ "C",
+        Time > 16.74 & Time < 18.5  ~ "D"
+      ),
+      Burst_eq = case_when(
+        Time > 0.40  & Time <  2    + 1.30 ~ "A",
+        Time > 4.87  & Time <  6.17 + 1.30 ~ "B",
+        Time > 10.74 & Time < 12.54 + 1.30 ~ "C",
+        Time > 16.74 & Time < 18.5  + 1.30 ~ "D"
+      )
+    ) %>% 
+    # correlation with expected
+    group_by(Sweep) %>% 
+    mutate(Cor = cor(In4, predicted)) %>% 
+    ungroup() %>% 
+    gather(Key, mV, c("In4", "predicted")) %>% 
+    ## Metrics for whole sweep
+    group_by(Key, Sweep) %>% 
+    # Min voltage
+    mutate(Min.V = min(mV, na.rm = T)) %>%
+    # Defining Baseline as average of the lowest 20% of points
+    mutate(Use.in.Base = quantile(mV, probs = .2, na.rm = T)) %>%
+    mutate(Use.in.Base = ifelse(mV <= Use.in.Base, mV, NA)) %>%
+    mutate(Use.in.Base = mean(Use.in.Base, na.rm = T)) %>%
+    # Max voltage
+    mutate(Max.Amplitude = max(mV, na.rm = T)) %>%
+    # AUC
+    # Using Min.V
+    mutate(AUC = sum(mV - Min.V, na.rm = T)/19.68685) %>%
+    ungroup() 
+  
+  
+  if (rewrite_names){
+    temp_processed <- temp_processed %>% 
+      mutate(Key = ifelse(Key == "In4", "In9", Key))
+  }
+  
+  
+  temp_processed <- temp_processed[, c("Sweep", "Cor", "Key", "Min.V", #"Use.in.Base", 
+                                       "Max.Amplitude", "AUC")] %>% 
+    distinct() #%>% 
+    # pivot_wider(names_from = "Key", values_from = c("Min.V", #"Use.in.Base", 
+    #                                                 "Max.Amplitude", "AUC")) 
+  
+  
+  # add annotations to aid merging
+  file_name <- brian2_read_in[[1]] %>% str_split(pattern = "-")
+  
+  temp_processed$Experiment <- as.character(str_split(as.character(file_name[[1]][1]), pattern = "_")[[1]][1])
+  temp_processed$FileName <- paste0(as.character(file_name[[1]][1]), ".abf")
+  temp_processed$Channel <- as.character(file_name[[1]][3])
+  
+  return(temp_processed)
+})
+
+
+epsp_summary <- do.call(rbind, epsp_summary_list)
+epsp_summary <- epsp_summary[, c("Experiment", "FileName", "Channel", "Sweep", "Cor", "Key", "Min.V", "Max.Amplitude", "AUC")]
+
+```
+
+Write out
+```{r}
+
+epsp_summary <- as.data.frame(epsp_summary)
+
+write.csv(epsp_summary, here("data", "epsp.csv"), row.names = F)
+
+# save(epsp_summary, file = here("data", "epsp.rds"))
+```
+
+
+
+Placeholder for fi
+```{r}
+# currently not used
+```
+
+## Save automatically processed data
+```{r}
+#TODO
+```
+
+
+# Finish wrangling manually processed data ----
+
+# Voltage Clamp K+ Protocols
+## IA data 
+Add intercept/slope from -35 to 5mV
+```{r}
+# ia <- ia %>% filter(Condition %in% c("Baseline", "Compensated", "Delayed") &
+#                       Pharm %in% c("none", "tea"))
+
+ia <- separate(ia, FileName, c("Experiment", "Recording"), sep = "_") %>% mutate(Recording = as.numeric(Recording))
+
+
+ia <- right_join(x = 
+  select(metadata, #Pharm, 
+         Condition, #Notes, 
+         In4,   In9, Experiment, Recording),
+  y = ia)# %>% filter(Experiment != "0")
+
+temp1 <- ia %>% select(-c(In9, S3Max, S4Max, S3Mean, S4Mean, Signal3, Signal4))
+temp2 <- ia %>% select(-c(In4, S1Max, S2Max, S1Mean, S2Mean, Signal1, Signal2))
+
+names(temp2) <- names(temp1)
+
+ia <- full_join(temp1, temp2) %>% mutate(Cell = as.factor(In4))
+
+# ia %>% 
+#   # filter(Pharm != "4ap") %>% 
+#   ggplot(aes(S1Max, S2Max, color = Cell))+
+#   geom_point()+
+#   facet_grid(Condition ~ Experiment)+
+#   theme_bw()
+
+ia$intercept <- NA %>% as.numeric() 
+ia$slope <- NA %>% as.numeric()
+
+ia <- ia %>% mutate(iter.var = paste(Experiment, Cell, Condition, sep =  "_"))
+iter.over <- ia$iter.var %>% unique()
+
+walk(1:length(iter.over), function(i){
+  print(i)
+  temp.df <- ia[ia$iter.var == iter.over[i], ]
+  # temp <- select(temp, -c(leak, leak.sub))
+  if(length(na.omit(temp.df$S2Max)) >1 &
+     length(na.omit(temp.df$S1Max)) >1){
+    
+    temp.fm <- iv_linear(input.df = temp.df,
+                         min.mV = -35,
+                         max.mV = 5,
+                         ch.i = "S2Max",
+                         ch.v = "S1Max")
+    if (length(temp.fm) > 0 ){
+      ia[ia$iter.var == iter.over[i], "intercept"] <<- temp.fm$intercept
+      ia[ia$iter.var == iter.over[i], "slope"] <<- temp.fm$slope    
+    }}
+})
+
+# ia %>%
+#   ggplot(aes(Condition, intercept))+
+#   geom_point()+
+#   theme_minimal()
+```
+
+Repeat for the sustained portion of the current.
+```{r}
+ia$intercept_s <- NA %>% as.numeric() 
+ia$slope_s <- NA %>% as.numeric()
+
+ia <- ia %>% mutate(iter.var = paste(Experiment, Cell, Condition, sep =  "_"))
+iter.over <- ia$iter.var %>% unique()
+
+walk(1:length(iter.over), function(i){
+  print(i)
+  temp.df <- ia[ia$iter.var == iter.over[i], ]
+  # temp <- select(temp, -c(leak, leak.sub))
+  if(length(na.omit(temp.df$S2Mean)) >1 &
+     length(na.omit(temp.df$S1Mean)) >1){
+    
+    temp.fm <- iv_linear(input.df = temp.df,
+                         min.mV = -35,
+                         max.mV = 5,
+                         ch.i = "S2Mean",
+                         ch.v = "S1Mean")
+    if (length(temp.fm) > 0 ){
+      ia[ia$iter.var == iter.over[i], "intercept_s"] <<- temp.fm$intercept
+      ia[ia$iter.var == iter.over[i], "slope_s"] <<- temp.fm$slope
+    }}
+})
+```
+
+
+## IHTK data (not leak substracted)
+```{r}
+# ihtk <- ihtk %>% filter(Condition %in% c("Baseline", "Compensated", "Delayed") &
+#                       Pharm %in% c("none", "tea"))
+
+ihtk <- separate(ihtk, FileName, c("Experiment", "Recording"), sep = "_") %>% mutate(Recording = as.numeric(Recording))
+
+
+ihtk <- right_join(x = 
+  select(metadata, #Pharm, 
+         Condition, #Notes, 
+         In4,   In9, Experiment, Recording),
+  y = ihtk)# %>% filter(Experiment != "0")
+
+temp1 <- ihtk %>% select(-c(In9, S3Max, S4Max, S3Mean, S4Mean, Signal3, Signal4))
+temp2 <- ihtk %>% select(-c(In4, S1Max, S2Max, S1Mean, S2Mean, Signal1, Signal2))
+
+names(temp2) <- names(temp1)
+
+ihtk <- full_join(temp1, temp2) %>% mutate(In4 = as.factor(In4)) %>% rename(Cell = In4)
+
+# ihtk %>% 
+#   # filter(Pharm != "4ap") %>% 
+#   ggplot(aes(S1Max, S2Max, color = Cell))+
+#   geom_point()+
+#   facet_grid(Condition ~ Experiment)+
+#   theme_bw()
+```
+
+```{r}
+
+
+ihtk <- ihtk %>% filter(Condition %in% c("Baseline", "Compensated", "Delayed"))
+
+ihtk <- ihtk[!is.na(ihtk[["Experiment"]]) & 
+         !is.na(ihtk[["Cell"]]) &
+         !is.na(ihtk[["Condition"]]), ] 
+
+ihtk <- ihtk %>% 
+  mutate(iter.var = paste(Experiment, Cell, Condition, sep =  "_")) %>% 
+  mutate(leak = NA) %>% 
+  mutate(leak.sub = NA)
+
+
+iter.over <- ihtk$iter.var %>% unique()
+
+
+
+# Add in leak subtracted measure
+ihtk$na.action <- "NA"
+ihtk$leak <- as.numeric(ihtk$leak) # necessary for merging
+ihtk$leak.sub <- as.numeric(ihtk$leak.sub) # necessary for merging
+walk(1:length(iter.over), function(i){
+  print(i)
+  temp <- ihtk[ihtk$iter.var == iter.over[i], ]
+  temp <- select(temp, -c(leak, leak.sub))
+  
+  temp <- subtract_leak_df(input.df = temp,
+                     min.mV = -81,
+                     max.mV = -39,
+                     ch.i = "S2Max",
+                     ch.v = "S1Max")
+  if(nrow(temp)>1){
+    # make sure the columns are in the same order
+    temp <- temp[, names(ihtk)]
+   
+    ihtk[ihtk$iter.var == iter.over[i], ] <<- temp      
+  }
+})
+
+ihtk <- ihtk %>% mutate(leak = as.numeric(leak)) 
+ihtk$leak.sub <- ihtk$S2Max - ihtk$leak
+
+ihtk$leak.sub_s <- ihtk$S2Mean - ihtk$leak
+
+# ihtk %>% ggplot()+
+#    geom_line(aes(x = S1Max, y = leak, color = Cell), linetype = "dashed")+
+#    geom_point(aes(x = S1Max, y = leak.sub, color = Cell))+
+#    geom_line(aes(x = S1Max, y = S2Max, color = Cell))+
+#   facet_grid(Condition ~ Experiment)+
+#   theme_bw()
+
+# ggsave(plot = last_plot(), filename = "IonicExample.tiff", path = here("data", "figures"))
+
+# ihtk %>% 
+#   filter(Experiment == "190716") %>% 
+#   ggplot()+
+#    geom_line(aes(x = S1Max, y = leak, color = Cell), linetype = "dashed")+
+#    geom_point(aes(x = S1Max, y = leak.sub, color = Cell))+
+#    geom_line(aes(x = S1Max, y = S2Max, color = Cell))+
+#   facet_grid(Condition ~ Cell)+
+#   theme_bw()
+```
+
+Fit Roughly linear portion from IHTK
+```{r}
+ihtk$intercept <- NA %>% as.numeric() 
+ihtk$slope <- NA %>% as.numeric()
+
+walk(1:length(iter.over), function(i){
+  print(i)
+  temp.df <- ihtk[ihtk$iter.var == iter.over[i], ]
+  # temp <- select(temp, -c(leak, leak.sub))
+  if(nrow(temp.df) > 1){
+    temp.fm <- iv_linear(input.df = temp.df,
+                         min.mV = -35,
+                         max.mV = 5,
+                         ch.i = "S2Max",
+                         ch.v = "S1Max")
+    if (length(temp.fm) > 0 ){
+      ihtk[ihtk$iter.var == iter.over[i], "intercept"] <<- temp.fm$intercept
+      ihtk[ihtk$iter.var == iter.over[i], "slope"] <<- temp.fm$slope    
+    }}
+})
+
+
+```
+
+```{r}
+# ihtk %>% 
+#   ggplot(aes(Condition, intercept))+
+#   geom_point()+
+#   theme_minimal()
+# 
+# ihtk %>% 
+#   ggplot(aes(Condition, slope))+
+#   geom_point()+
+#   theme_minimal()
+```
+
+Repeat for the sustained portion of the current.
+```{r}
+# leak.sub_s
+
+ihtk$intercept_s <- NA %>% as.numeric() 
+ihtk$slope_s <- NA %>% as.numeric()
+
+walk(1:length(iter.over), function(i){
+  print(i)
+  temp.df <- ihtk[ihtk$iter.var == iter.over[i], ]
+  # temp <- select(temp, -c(leak, leak.sub))
+  if(nrow(temp.df) > 1){
+    temp.fm <- iv_linear(input.df = temp.df,
+                         min.mV = -35,
+                         max.mV = 5,
+                         ch.i = "S2Mean",
+                         ch.v = "S1Mean")
+    if (length(temp.fm) > 0 ){
+      ihtk[ihtk$iter.var == iter.over[i], "intercept_s"] <<- temp.fm$intercept
+      ihtk[ihtk$iter.var == iter.over[i], "slope_s"] <<- temp.fm$slope    
+    }}
+})
+
+```
+
+
+
+## Join ephys into combined df
+```{r}
+temp1 <- ihtk %>% 
+  select(#Pharm, 
+         Condition, Cell, Experiment, intercept, slope, intercept_s, slope_s) %>% 
+  filter(!duplicated(.)) %>% 
+  rename(Ihtk.0 = intercept) %>% 
+  rename(Ihtk.Slope = slope) %>% 
+  rename(Ihtk.0.s = intercept_s) %>% rename(Ihtk.Slope.s = slope_s)
+temp2 <- ia %>% select(#Pharm, 
+  Condition, Cell, Experiment, intercept, slope, intercept_s, slope_s) %>% 
+  filter(!duplicated(.)) %>% 
+  rename(Ia.0 = intercept) %>% rename(Ia.Slope = slope) %>% 
+  rename(Ia.0.s = intercept_s) %>% rename(Ia.Slope.s = slope_s)
+
+ionic <- full_join(temp1, temp2) %>% 
+  filter(Condition %in% c("Baseline", "Compensated", "Delayed")) %>% 
+  mutate(Condition = factor(Condition, levels = c("Baseline", "Compensated", "Delayed")))
+```
+
+## Save ionic for later use
+```{r}
+save(ionic, file = here("data", "ionic.rds"))
+```
+
+
+# Molecular Data
+
+## Read in Brian's Data
+```{r}
+# load all of brian's cells
+BriansCells <- list.files(here("inst", "extdata", "BriansCells"))
+BriansCells <- BriansCells[!(BriansCells == "All.CSV")]
+
+BriansDfs <- map(BriansCells, function(i){
+  temp <- read.csv(here("inst", "extdata", "BriansCells", i))
+  names(temp) <- janitor::make_clean_names(names(temp), case = "upper_camel")
+  temp$Condition <- i
+  temp$Source <- "Brian"
+  
+  return(temp)
+})
+
+BriansDf <- do.call(rbind, BriansDfs)
+
+BriansDf$Condition <- BriansDf$Condition %>% str_remove(pattern = ".CSV")
+
+BriansDf$Time <- ifelse(str_detect(BriansDf$Condition, pattern = "Control") & !(str_detect(BriansDf$Condition, pattern = "24")), "Baseline",
+                        ifelse(str_detect(BriansDf$Condition, pattern = "Acute"), "Compensated",
+                               ifelse(str_detect(BriansDf$Condition, pattern = "24"), "Delayed", "NotFound")
+                               )
+                        )
+
+BriansDf$Pharm <- ifelse(str_detect(BriansDf$Condition, pattern = "Control"), "None",
+                        ifelse(str_detect(BriansDf$Condition, pattern = "TEA"), "TEA",
+                               ifelse(str_detect(BriansDf$Condition, pattern = "AP"), "AP", 
+                                      ifelse(str_detect(BriansDf$Condition, pattern = "TTX"), "TTX", "NotFound")
+                                      )
+                               )
+                        )
+
+BriansDf <- BriansDf[, names(BriansDf)[!(names(BriansDf) %in% c("Condition"))]]
+
+BriansDf <- BriansDf %>% select(-Treatment)
+
+BriansMetadataCols <- c("Source", "Pharm", "Time", "Cell")
+BriansDf <- BriansDf[, c(BriansMetadataCols, names(BriansDf)[!(names(BriansDf) %in% BriansMetadataCols)]) ]
+
+
+# df <- data.frame()
+# walk(BriansCells, function(i){
+#   df <<- rbind(df, read.csv(here("inst", "extdata", "BriansCells",i)))
+# })
+# 
+# df <- df %>% mutate(Pharm = "") %>% mutate(Condition = "")
+# 
+# update.df.labels <- data.frame(stringsAsFactors=FALSE,
+#                                Treatment = c("4AP24h", "Control", "24h-CONTROL", "TEA-24h", "TEA-Acute",
+#                                              "TTX-24h"),
+#                                Pharm = c("AP", "none", "none", "tea", "tea", "ttx"),
+#                                Condition = c("Delayed", "Baseline", "Delayed", "Delayed", "Compensated",
+#                                              "Delayed")
+# )
+# 
+# walk(1:nrow(update.df.labels), function(i){
+#   up.t <- update.df.labels[i, "Treatment"]
+#   up.p <- update.df.labels[i, "Pharm"]
+#   up.c <- update.df.labels[i, "Condition"]
+#   
+#   BriansDf[BriansDf$TREATMENT == up.t, "Pharm"] <<- up.p
+#   BriansDf[BriansDf$TREATMENT == up.t, "Condition"] <<- up.c
+# })
+# 
+# df <- df %>% rename(UID = CELL) %>% select(-TREATMENT)
+# df <- as_tibble(df)
+# # mutate(var = replace(var, var != "Candy", "Not Candy"))
+```
+## Read in data paired with ephys
+```{r}
+TEAOverTime <- readxl::read_excel(here("inst", "extdata", "LCTEAhr0hr1hr24.xlsx")) %>% janitor::clean_names(case = "upper_camel")
+
+TEAOverTime$Time <- ifelse(TEAOverTime$Tea == 0, "Baseline", 
+                           ifelse(TEAOverTime$Tea == 1, "Compensated", 
+                                  ifelse(TEAOverTime$Tea == 24, "Delayed", "NotFound")))
+
+TEAOverTime$Pharm <- "TEA"
+TEAOverTime$Source <- "Daniel"
+
+TEAOverTime <- TEAOverTime[, names(TEAOverTime)[!(names(TEAOverTime) %in% c("Tea"))]]
+
+MetadataCols <- c("Source", "Pharm", "Time", "Sample", "Experiment", "Cell")
+TEAOverTime <- TEAOverTime[, c(MetadataCols, names(TEAOverTime)[!(names(TEAOverTime) %in% MetadataCols)]) ]
+```
+
+```{r}
+# Make everything lower to ensure easy merging.
+names(TEAOverTime)[!(names(TEAOverTime) %in% c("Source", "Pharm", "Time", "Sample", "Experiment", "Cell"))] <- tolower(names(TEAOverTime)[!(names(TEAOverTime) %in% c("Source", "Pharm", "Time", "Sample", "Experiment", "Cell"))])
+
+names(BriansDf)[!(names(BriansDf) %in% c("Source", "Pharm", "Time", "Sample", "Experiment", "Cell"))] <- tolower(names(BriansDf)[!(names(BriansDf) %in% c("Source", "Pharm", "Time", "Sample", "Experiment", "Cell"))])
+
+
+
+
+
+
+mrna <- full_join(TEAOverTime, BriansDf)
+```
+
+Rename gene names so they're consistent and easy to lookup with `./inst/extdata/mRNAInfo.xlsx`
+```{r}
+mRNAInfo <- readxl::read_excel(here("inst", "extdata", "mRNAInfo.xlsx")) # tables from Northcutt 2016 and annotations
+ToCorrect <- names(mrna)[!(names(mrna) %in% c("Source", "Pharm", "Time", "Sample", "Experiment", "Cell"))]
+# ToCorrect <- tolower(ToCorrect)
+
+# Get the names InData and the corresponding output names
+SwapNames <- mRNAInfo[mRNAInfo$InDataLower %in% ToCorrect, c("InDataLower", "RGeneName")]
+# SwapNames$InData <- tolower(SwapNames$InData)
+
+for (i in 1:nrow(SwapNames)){
+  ToCorrect[ToCorrect == as.character(SwapNames[i, "InDataLower"])] <- as.character(SwapNames[i, "RGeneName"])  
+}
+
+names(mrna) <- c("Source", "Pharm", "Time", "Sample", "Experiment", "Cell", ToCorrect)
+```
+
+
+```{r}
+save(mrna, file = here("data", "mrna.rds"))
+```
+
+#End
